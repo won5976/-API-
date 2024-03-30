@@ -1,0 +1,131 @@
+
+import sys
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QAxContainer import QAxWidget
+
+# 유저 정보
+USER_INFO_TYPE = {
+    "ACC_CNT": "ACCOUNT_CNT",  # 전체 계좌 수
+    "ALL_ACC": "ACCNO",        # 모든 계좌 구분자 ;
+    "UID": "USER_ID",          # 사용자 ID
+    "UNAME": "USER_NAME"       # 사용자 이름
+}
+
+class KiwoomWrapper(QAxWidget):
+
+    def __init__(self):
+        super().__init__()
+        # OpenAPI 컨트롤 설정하기
+        self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
+        #연결
+        self.OnEventConnect[int].connect(self.handleEventConnect)
+        self.OnReceiveTrData[str, str, str, str, str, int, str, str, str].connect(self.handleReceiveTrData)
+        self.OnReceiveMsg[str, str, str, str].connect(self.handleReceiveMsg)
+        self.OnReceiveChejanData[str, int, str].connect(self.handleReceiveChejanData)
+        self.loginCheck = False
+        # 코드 갑자기 종료되는 것 방지용 루프 설정
+        self.loginEventLoop = QEventLoop()
+
+    def handleReceiveMsg(self, scrNo, rqName, trCode, msg):
+        print(f"메시지 수신 - 화면번호: {scrNo}, 요청이름: {rqName}, TrCode: {trCode}, 메시지: {msg}")
+
+    def handleReceiveChejanData(self, gubun, itemCnt, fidList):
+        print(f"체결 데이터 수신 - 구분: {gubun}, 아이템 수: {itemCnt}, FID 목록: {fidList}")
+        fidList = fidList.split(';')
+        for fid in fidList:
+            result = self.dynamicCall("GetChejanData(int)", int(fid))
+            if fid == '912' and result == "체결":
+                print("#### 주문 성공적으로 체결됨 ####")
+            print(result)
+
+    def handleReceiveTrData(self, scrNo, rqName, trCode, recordName, prevNext, dataLength, errorCode, message, splmMsg):
+        if rqName == "Request1":
+            values = [
+                self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, 0, "종목명").strip(),
+                self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, 0, "현재가").strip(),
+                self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, 0, "거래량").strip()
+            ]
+            print(values)
+        elif rqName == "Request2":
+            accountInfo = {"cash": self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, 0, "D+2추정예수금").strip(), "stocks": []}
+            idx = self.dynamicCall("GetDataCount(QString)", rqName)
+            for i in range(idx):
+                stockInfo = {
+                    "name": self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, i, "종목명").strip(),
+                    "qty": self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, i, "보유수량").strip(),
+                    "price": self.dynamicCall("CommGetData(QString, QString, QString, int, QString)", trCode, "", rqName, i, "평균단가").strip()
+                }
+                accountInfo["stocks"].append(stockInfo)
+            print(accountInfo)
+        elif rqName == "RQ_1":
+            print("RQ_1 데이터 수신")
+        #무한 루프 종료 시점
+        self.loginEventLoop.exit()
+
+    def handleEventConnect(self, errCode):
+        if errCode == 0:
+            self.loginCheck = True
+            print("접속 성공")
+        else:
+            self.loginCheck = False
+            print("접속 실패")
+        # 루프 종료 조건
+        self.loginEventLoop.exit()
+
+    def commConnect(self):
+        # 프로그램 접속 시작 지점
+        self.dynamicCall("CommConnect()")
+        #  루프 시작 지점
+         self.loginEventLoop.exec_()
+
+    def getMyAllAccount(self):
+        if self.loginCheck:
+            accounts = self.dynamicCall("GetLoginInfo(QString)", USER_INFO_TYPE["ALL_ACC"])
+            return accounts.split(';') if accounts else []
+        return []
+
+    def getValue(self, stockCode=None):
+        if self.loginCheck:
+            if isinstance(stockCode, str):
+                stockCode = str(stockCode)
+            self.dynamicCall("SetInputValue(QString, QString)", "종목코드", stockCode)
+            error = self.dynamicCall("CommRqData(QString, QString, int, QString)", "Request1", "opt10001", 0, "0101")
+            if error == 0:
+                self.loginEventLoop.exec_()
+
+    def getPortfolio(self, accountNumber, pwdInputType="00"):
+        if self.loginCheck:
+            if isinstance(accountNumber, str):
+                accountNumber = str(accountNumber)
+            self.dynamicCall("SetInputValue(QString, QString)", "계좌번호", accountNumber)
+            self.dynamicCall("SetInputValue(QString, QString)", "비밀번호", "")
+            self.dynamicCall("SetInputValue(QString, QString)", "상장폐지조회구분", 0)
+            self.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", pwdInputType)
+            while True:
+                error = self.dynamicCall("CommRqData(QString, Qstring, int, Qstring)", "Request2", "opw00004", 0, "0346")
+                print(self.errorCatch(error))
+                if error == -201:
+                    # 실패하면 최대 5번 재시도
+                    if acCnt >= 5:
+                        break
+                    ret = self.dynamicCall("KOA_Functions(QString, QString)", "ShowAccountWindow", "")
+                    acCnt += 1
+                elif error == 0:
+                    self.loginEventLoop.exec_()
+                    break
+                else:
+                    break
+
+       def doOrder(self, accountNumber, orderType, stockCode, quantity, price, hogaGb):
+        if isinstance(accountNumber, str):
+            accountNumber = str(accountNumber)
+        error = -999
+        acCnt = 0
+        while True:
+            error = self.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
+                                     ["RQ_1", "0101", accountNumber, int(orderType), str(stockCode), int(quantity), int(price), str(hogaGb), ""])
+            print(self.errorCatch(error))
+            if error == -301:
+                # 실패하면 5번 반복하기
+                if acCnt >= 5;
